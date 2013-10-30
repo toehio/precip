@@ -689,7 +689,7 @@ class EC2Experiment(Experiment):
             raise ExperimentException("Unable to provision a new instance", e)
         return res.instances[0]
 
-    def _finish_instanciation(self, instance):
+    def _finish_instanciation(self, instance, bootstrap=True):
         """
         Finishes booting and bootstraps an instace
         
@@ -744,9 +744,12 @@ class EC2Experiment(Experiment):
         err = ""
         try:
             ssh = SSHConnection()
-            script_path = os.path.dirname(os.path.abspath(__file__)) + "/resources/vm-bootstrap.sh"
-            ssh.put(self._ssh_privkey, ec2inst.public_dns_name, "root", script_path, "/root/vm-bootstrap.sh")
-            exit_code, out, err = ssh.run(self._ssh_privkey, ec2inst.public_dns_name, "root", "chmod 755 /root/vm-bootstrap.sh && /root/vm-bootstrap.sh")
+            if bootstrap:
+                script_path = os.path.dirname(os.path.abspath(__file__)) + "/resources/vm-bootstrap.sh"
+                ssh.put(self._ssh_privkey, ec2inst.public_dns_name, instance.username, script_path, "/root/vm-bootstrap.sh")
+                exit_code, out, err = ssh.run(self._ssh_privkey, ec2inst.public_dns_name, instance.username, "chmod 755 /root/vm-bootstrap.sh && /root/vm-bootstrap.sh")
+            else:
+                exit_code, out, err = ssh.run(self._ssh_privkey, ec2inst.public_dns_name, instance.username, "echo $(cat /etc/hostname) available")
         except paramiko.SSHException:
             logger.debug("Failed to run bootstrap script on instance %s. Will retry later." % instance.id)
             logger.debug("Out: " + out)
@@ -815,7 +818,7 @@ class EC2Experiment(Experiment):
 
             
     def provision(self, image_id, instance_type='m1.small', count=1, ebs_size=None, tags=None,
-                  boot_timeout=600, boot_max_tries=3):
+                  boot_timeout=600, boot_max_tries=3, username='root'):
         """
         Provision a new instance. Note that this method starts the provisioning cycle, but does not
         block for the instance to finish booting - for that, see wait()
@@ -847,6 +850,7 @@ class EC2Experiment(Experiment):
             instance.image_id = image_id
             instance.instance_type = instance_type
             instance.ebs_size = ebs_size
+            instance.username = username
             
             # add basic tags
             instance.add_tag("precip")
@@ -856,7 +860,7 @@ class EC2Experiment(Experiment):
             
             self._instances.append(instance)
 
-    def wait(self, tags=[]):
+    def wait(self, tags=[], bootstrap=True):
         """
         Barrier for all currently instances to finish booting and be accessible via external addresses.
         
@@ -871,7 +875,7 @@ class EC2Experiment(Experiment):
             current_time = int(time.time())
 
             for i in self._instance_subset(tags):
-                if not self._finish_instanciation(i):
+                if not self._finish_instanciation(i, bootstrap=bootstrap):
                     count_pending += 1
 
                     # did the instance timeout?
