@@ -187,7 +187,7 @@ class Experiment:
     Base class for all types of cloud implementations. This is what defines the experiment API.
     """
     
-    def __init__(self, name = None):
+    def __init__(self, name = None, ssh_privkey = None):
         """
         Constructor for a new experiment - this will set up ~/.precip and ssh keys if they
         do not already exist in a way that you can use precip from multiple machines or 
@@ -211,7 +211,11 @@ class Experiment:
         
         # ssh keys setup 
         self._ssh_pubkey = os.path.join(self._conf_dir, "precip_"+uid+".pub")
-        self._ssh_privkey = os.path.join(self._conf_dir, "precip_"+uid)
+        if ssh_privkey is None:
+            self._ssh_privkey = os.path.join(self._conf_dir, "precip_"+uid)
+        else:
+            self._ssh_privkey = ssh_privkey
+
         if not os.path.exists(self._ssh_privkey):
             logger.info("Creating new ssh key in " + self._conf_dir)
             logger.info("You don't need to enter a passphrase, just leave it blank and press enter!")
@@ -473,7 +477,7 @@ class Experiment:
 
 class EC2Experiment(Experiment):
     
-    def __init__(self, region, endpoint, access_key, secret_key, name = None):
+    def __init__(self, region, endpoint, access_key, secret_key, name = None, security_groups = None, keypair_name = None, ssh_privkey = None):
         """
         Initializes an EC2 experiment
         
@@ -481,13 +485,18 @@ class EC2Experiment(Experiment):
         :param endpoint: Amazon EC2 endpoint, for example ec2.us-west-2.amazonaws.com
         :param access_keys: Amazon EC2 access key
         :param secret_keys: Amazon EC2 secret key
+        :param security_groups: list of EC2 security groups
+        :param keypair_name: name of EC2 keypair
+        :param ssh_privkey: path to ssh private key for EC2 keypair
         """        
-        Experiment.__init__(self, name = name)
+        Experiment.__init__(self, name = name, ssh_privkey = ssh_privkey)
     
         self._region = region
         self._endpoint = endpoint
         self._access_key = access_key
         self._secret_key = secret_key
+        self._security_groups = security_groups
+        self._keypair_name = keypair_name
     
         self._conn = None
         
@@ -564,20 +573,27 @@ class EC2Experiment(Experiment):
         """
         uid = self._get_account_id()
         keypairs = None
+
+        if self._keypair_name is None:
+					keypair_name = "precip_"+uid
+        else:
+					keypair_name = self._keypair_name
+
         try:
-            keypairs = self._conn.get_key_pair("precip_"+uid)
+            keypairs = self._conn.get_key_pair(keypair_name)
 
             # TODO: verify that the existing keypair matches the one in ~/.precip
         except IndexError, ie:
             # not found on eucalyptus
             pass
         except EC2ResponseError, e:
-            if e.error_code in ["InvalidKeyPair.NotFound", "KeypairNotFound", "EC2APIError"]:
+            if self._keypair_name is not None:
+                raise ExperimentException("Unable to query for key pair", e)
+            elif e.error_code in ["InvalidKeyPair.NotFound", "KeypairNotFound", "EC2APIError"]:
                 keypairs = None
             else:
                 raise ExperimentException("Unable to query for key pair", e)
-  
-         
+
         if keypairs is None:
             logger.info("Registering ssh pubkey as 'precip_"+uid+"'")
             f = open(self._ssh_pubkey)
@@ -590,9 +606,17 @@ class EC2Experiment(Experiment):
         Sets up the default security group
         """
         sgroups = None
+
+        if self._security_groups is None:
+            sgroup_names = ["precip"]
+        else:
+            sgroup_names = self._security_groups
+
         try:
-            sgroups = self._conn.get_all_security_groups(["precip"])
+            sgroups = self._conn.get_all_security_groups(sgroup_names)
         except EC2ResponseError, e:
+            if self._security_groups is not None:
+                raise ExperimentException("Unable to find security group", e)
             if e.error_code in ["InvalidGroup.NotFound", "SecurityGroupNotFoundForProject"]:
                 sgroups = None
             else:
@@ -618,6 +642,17 @@ class EC2Experiment(Experiment):
         """
         uid = self._get_account_id()
         boto_instance = None
+
+        if self._keypair_name is None:
+            keypair_name = "precip_"+uid
+        else:
+            keypair_name = self._keypair_name
+
+        if self._security_groups is None:
+            sgroup_names = ["precip"]
+        else:
+            sgroup_names = self._security_groups
+
         try:
             # block device maps is only needed if the user wants to specify ebs_size
             block_device_map = None
@@ -635,15 +670,16 @@ class EC2Experiment(Experiment):
             if image_obj is None:
                 raise ExperimentException("Image %s does not exist" %(image_id))
 
+
             if self._security_groups_support:
                 res = image_obj.run(instance_type = instance_type,
-                                    key_name = "precip_"+uid,
+                                    key_name = keypair_name,
                                     instance_initiated_shutdown_behavior = "terminate",
                                     block_device_map = block_device_map,
-                                    security_groups = ["precip"])
+                                    security_groups = sgroup_names)
             else:
                 res = image_obj.run(instance_type = instance_type,
-                                    key_name = "precip_"+uid,
+                                    key_name = keypair_name,
                                     instance_initiated_shutdown_behavior = "terminate",
                                     block_device_map = block_device_map)
             boto_instance = res.instances[0]
